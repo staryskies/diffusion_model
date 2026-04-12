@@ -14,7 +14,7 @@ from torchvision import transforms
 # =========================
 # SETTINGS
 # =========================
-train = True          # Set to False to generate images only
+train = False          # Set to False to generate images only
 image_paths = [
     "image.png","image1.png","image2.png","image3.png","image4.png",
     "image5.png","image6.png","image7.png","image8.png","image9.png",
@@ -24,7 +24,7 @@ image_paths = [
 ]
 device = "cuda" if torch.cuda.is_available() else "cpu"
 T = 400
-epochs = 900
+epochs = 5000
 batch_size = 4
 lr = 2e-4
 ema_decay = 0.993
@@ -257,7 +257,7 @@ if train:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             update_ema(ema_model, model)
-        if epoch % 10 == 0:
+        if epoch % 5 == 0:
             print(f"Epoch {epoch} | Loss {loss.item():.4f}")
     torch.save(ema_model.state_dict(), "diffusion_ema.pth")
     print("Training done. Model saved.")

@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
@@ -10,48 +10,140 @@ import math
 import os
 from torchvision import transforms
 
+from transformers import CLIPTextModel, CLIPTokenizer
+
 
 # =========================
 # SETTINGS
 # =========================
-train = False          # Set to False to generate images only
+train = True
 image_paths = [
     "image.png","image1.png","image2.png","image3.png","image4.png",
     "image5.png","image6.png","image7.png","image8.png","image9.png",
     "image10.png","image11.png","image12.png","image13.png","image14.png",
     "image15.png","image16.png","image17.png","image18.png","image19.png",
-    "image20.png","image21.png","image22.png", "image23.png"
+    "image20.png","image21.png","image22.png",
+    "image copy.png",
+    "image copy 2.png",
+    "image copy 3.png",
+    "image copy 4.png",
+    "image copy 5.png",
+    "image copy 6.png",
+    "image copy 7.png",
+    "image copy 8.png",
+    "image copy 9.png",
+    "image copy 10.png",
+    "image copy 11.png",
+    "image copy 12.png",
+    "image copy 13.png",
+    "image copy 14.png",
+    "image copy 15.png",
+    "image copy 16.png",
+    "image copy 17.png",
+    "image copy 18.png",
+    "image copy 19.png",
+    "image copy 20.png"
 ]
+
+captions = [
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Blue haired girl",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy",
+    "Brown haired boy"
+
+
+]
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 T = 400
-epochs = 5000
+epochs = 200
 batch_size = 4
 lr = 2e-4
-ema_decay = 0.993
-
+ema_decay = 0.996
 
 augment = transforms.Compose([
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomCrop(64, padding=4),
-    ])
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomCrop(64, padding=4),
+])
+
 # =========================
 # LOAD IMAGES
 # =========================
-def load_images(paths, size=64):
-    images = []
-    for path in paths:
-        if not os.path.exists(path):
-            print(f"Warning: {path} not found")
-            continue
-        img = Image.open(path).convert("RGB").resize((size, size))
-        x = np.array(img).astype(np.float32) / 127.5 - 1
-        x = np.transpose(x, (2, 0, 1))
-        images.append(x)
-    images = np.stack(images)
-    return torch.tensor(images)
 
-dataset = load_images(image_paths, size=64)
-dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+class ImageCaptionDataset(Dataset):
+    def __init__(self, paths, captions, tokenizer, size=64):
+        assert len(paths) == len(captions), "Paths and captions must match"
+        self.size = size
+        self.tokenizer = tokenizer
+        self.samples = []
+
+        for path, caption in zip(paths, captions):
+            if not os.path.exists(path):
+                print(f"Warning: {path} not found, skipping")
+                continue
+            self.samples.append((path, caption))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        path, caption = self.samples[idx]
+
+        img = Image.open(path).convert("RGB").resize((self.size, self.size))
+        img = augment(img)
+        x = np.array(img).astype(np.float32) / 127.5 - 1
+        x = torch.tensor(np.transpose(x, (2, 0, 1)))
+
+        token = self.tokenizer(
+            caption,
+            padding="max_length",
+            truncation=True,
+            max_length=77,
+            return_tensors="pt"
+        )
+        input_ids = token.input_ids.squeeze(0)
+
+        return x, input_ids
+
 
 # =========================
 # COSINE BETA SCHEDULE
@@ -69,7 +161,7 @@ alphas = 1 - betas
 alpha_bars = torch.cumprod(alphas, dim=0)
 
 # =========================
-# MODEL DEFINITION (UNet + helpers)
+# MODEL DEFINITION
 # =========================
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):
@@ -121,74 +213,140 @@ class MultiHeadAttention(nn.Module):
         k = k.reshape(B, self.heads, C//self.heads, H*W)
         v = v.reshape(B, self.heads, C//self.heads, H*W)
         attn = torch.einsum('bhcn,bhcm->bhnm', q, k) * self.scale
+
+        #B = batch size
+        #h = number of heads
+        #d = channels per head = C // h
+        #n = number of image tokens = H * W
+        #k: (B, h, m, d) where
+
+        #m = number of text tokens = 77
+        #d = dimensions (same as head amount) 
         attn = torch.softmax(attn, dim=-1)
         out = torch.einsum('bhnm,bhcm->bhcn', attn, v)
         out = out.reshape(B, C, H, W)
         return x + self.proj(out)
-
-class UNet(nn.Module):
-    def __init__(self, base=128, time_dim=256):
+class CrossAttention(nn.Module):
+    def __init__(self, channels, text_dim, heads=4):
         super().__init__()
+        self.heads = heads
+        self.scale = (channels // heads) ** -0.5
+
+        self.to_q = nn.Conv2d(channels, channels, 1)
+        self.to_k = nn.Linear(text_dim, channels)
+        self.to_v = nn.Linear(text_dim, channels)
+
+        self.proj = nn.Conv2d(channels, channels, 1)
+
+    def forward(self, x, text_emb):
+        B, C, H, W = x.shape
+
+        # IMAGE → queries (tokens = H*W)
+        q = self.to_q(x).reshape(B, self.heads, C//self.heads, H*W)
+
+        # TEXT → keys/values (tokens = 77)
+        k = self.to_k(text_emb)   # (B, 77, C)
+        v = self.to_v(text_emb)
+
+        k = k.reshape(B, -1, self.heads, C//self.heads).transpose(1,2)  # (B,h,77,d)
+        v = v.reshape(B, -1, self.heads, C//self.heads).transpose(1,2)
+
+   
+        attn = torch.einsum('bhdn,bhmd->bhnm', q, k) * self.scale
+        attn = torch.softmax(attn, dim=-1)
+
+        out = torch.einsum('bhnm,bhmd->bhdn', attn, v)
+
+        out = out.reshape(B, C, H, W)
+        return x + self.proj(out)
+class UNet(nn.Module):
+    def __init__(self, base=128, time_dim=256, text_dim=768):
+        super().__init__()
+
         self.time_mlp = nn.Sequential(
             SinusoidalPosEmb(time_dim),
-            nn.Linear(time_dim, time_dim*4),
+            nn.Linear(time_dim, time_dim * 4),
             nn.SiLU(),
-            nn.Linear(time_dim*4, time_dim)
+            nn.Linear(time_dim * 4, time_dim)
         )
+
         self.init = nn.Conv2d(3, base, 3, padding=1)
+
         self.down1_block1 = ResBlock(base, base, time_dim)
         self.down1_block2 = ResBlock(base, base, time_dim)
-        self.downsample1 = nn.Conv2d(base, base*2, 4, 2, 1)
-        self.down2_block1 = ResBlock(base*2, base*2, time_dim)
-        self.down2_attn = MultiHeadAttention(base*2)
-        self.down2_block2 = ResBlock(base*2, base*2, time_dim)
-        self.downsample2 = nn.Conv2d(base*2, base*4, 4, 2, 1)
-        self.down3_block1 = ResBlock(base*4, base*4, time_dim)
-        self.down3_attn = MultiHeadAttention(base*4)
-        self.down3_block2 = ResBlock(base*4, base*4, time_dim)
-        self.downsample3 = nn.Conv2d(base*4, base*8, 4, 2, 1)
-        self.mid_block1 = ResBlock(base*8, base*8, time_dim)
-        self.mid_attn = MultiHeadAttention(base*8)
-        self.mid_block2 = ResBlock(base*8, base*8, time_dim)
-        self.up1 = nn.ConvTranspose2d(base*8, base*4, 4, 2, 1)
-        self.up1_block1 = ResBlock(base*8, base*4, time_dim)
-        self.up1_block2 = ResBlock(base*4, base*4, time_dim)
-        self.up2 = nn.ConvTranspose2d(base*4, base*2, 4, 2, 1)
-        self.up2_block1 = ResBlock(base*4, base*2, time_dim)
-        self.up2_block2 = ResBlock(base*2, base*2, time_dim)
-        self.up3 = nn.ConvTranspose2d(base*2, base, 4, 2, 1)
-        self.up3_block1 = ResBlock(base*2, base, time_dim)
+        self.downsample1 = nn.Conv2d(base, base * 2, 4, 2, 1)
+
+        self.down2_block1 = ResBlock(base * 2, base * 2, time_dim)
+        self.down2_attn = MultiHeadAttention(base * 2)
+        self.down2_crossattn = CrossAttention(base * 2, text_dim)
+        self.down2_block2 = ResBlock(base * 2, base * 2, time_dim)
+        self.downsample2 = nn.Conv2d(base * 2, base * 4, 4, 2, 1)
+
+        self.down3_block1 = ResBlock(base * 4, base * 4, time_dim)
+        self.down3_attn = MultiHeadAttention(base * 4)
+        self.down3_crossattn = CrossAttention(base * 4, text_dim)
+        self.down3_block2 = ResBlock(base * 4, base * 4, time_dim)
+        self.downsample3 = nn.Conv2d(base * 4, base * 8, 4, 2, 1)
+
+        self.mid_block1 = ResBlock(base * 8, base * 8, time_dim)
+        self.mid_attn = MultiHeadAttention(base * 8)
+        self.mid_crossattn = CrossAttention(base * 8, text_dim)
+        self.mid_block2 = ResBlock(base * 8, base * 8, time_dim)
+
+        self.up1 = nn.ConvTranspose2d(base * 8, base * 4, 4, 2, 1)
+        self.up1_block1 = ResBlock(base * 8, base * 4, time_dim)
+        self.up1_block2 = ResBlock(base * 4, base * 4, time_dim)
+
+        self.up2 = nn.ConvTranspose2d(base * 4, base * 2, 4, 2, 1)
+        self.up2_block1 = ResBlock(base * 4, base * 2, time_dim)
+        self.up2_block2 = ResBlock(base * 2, base * 2, time_dim)
+
+        self.up3 = nn.ConvTranspose2d(base * 2, base, 4, 2, 1)
+        self.up3_block1 = ResBlock(base * 2, base, time_dim)
         self.up3_block2 = ResBlock(base, base, time_dim)
+
         self.final = nn.Conv2d(base, 3, 1)
-    def forward(self, x, t):
+
+    def forward(self, x, t, text_emb):
         t = self.time_mlp(t)
         x = self.init(x)
+
         d1 = self.down1_block1(x, t)
         d1 = self.down1_block2(d1, t)
         x = self.downsample1(d1)
+
         d2 = self.down2_block1(x, t)
         d2 = self.down2_attn(d2)
+        d2 = self.down2_crossattn(d2, text_emb)
         d2 = self.down2_block2(d2, t)
         x = self.downsample2(d2)
+
         d3 = self.down3_block1(x, t)
         d3 = self.down3_attn(d3)
+        d3 = self.down3_crossattn(d3, text_emb)
         d3 = self.down3_block2(d3, t)
         x = self.downsample3(d3)
+
         x = self.mid_block1(x, t)
         x = self.mid_attn(x)
+        x = self.mid_crossattn(x, text_emb)
         x = self.mid_block2(x, t)
+
         x = self.up1(x)
         x = torch.cat([x, d3], dim=1)
         x = self.up1_block1(x, t)
         x = self.up1_block2(x, t)
+
         x = self.up2(x)
         x = torch.cat([x, d2], dim=1)
         x = self.up2_block1(x, t)
         x = self.up2_block2(x, t)
+
         x = self.up3(x)
         x = torch.cat([x, d1], dim=1)
         x = self.up3_block1(x, t)
         x = self.up3_block2(x, t)
+
         return self.final(x)
 
 # =========================
@@ -201,26 +359,23 @@ def update_ema(ema_model, model):
 
 
 @torch.no_grad()
-def sample(model, shape):
+def sample(model, shape, text_emb):
     x = torch.randn(shape, device=device)
     for t in reversed(range(T)):
         t_batch = torch.full((shape[0],), t, device=device).float()
-        t_norm = t_batch / T  # ← must match training normalization
-        pred_noise = model(x, t_norm)
+        t_norm = t_batch / T
+        pred_noise = model(x, t_norm, text_emb)
 
         alpha = alphas[t]
         alpha_bar = alpha_bars[t]
         alpha_bar_prev = alpha_bars[t - 1] if t > 0 else torch.tensor(1.0)
 
-        # Corrected DDPM denoising step
         x0_pred = (x - torch.sqrt(1 - alpha_bar) * pred_noise) / torch.sqrt(alpha_bar)
         x0_pred = x0_pred.clamp(-1, 1)
 
-        # Posterior mean
         mean = (torch.sqrt(alpha_bar_prev) * (1 - alpha) * x0_pred +
                 torch.sqrt(alpha) * (1 - alpha_bar_prev) * x) / (1 - alpha_bar)
 
-        # Fix #2: add noise for t > 0
         if t > 0:
             variance = (1 - alpha_bar_prev) / (1 - alpha_bar) * (1 - alpha)
             x = mean + torch.sqrt(variance) * torch.randn_like(x)
@@ -231,8 +386,17 @@ def sample(model, shape):
 # =========================
 # MODEL SETUP
 # =========================
+tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14").to(device)
+text_encoder.eval()
+for param in text_encoder.parameters():
+    param.requires_grad = False
+
+dataset = ImageCaptionDataset(image_paths, captions, tokenizer, size=64)
+dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
 model = UNet().to(device)
-ema_model = UNet().to(device)
+ema_model = UNet(text_dim=768).to(device)
 ema_model.load_state_dict(model.state_dict())
 optimizer = optim.AdamW(model.parameters(), lr=lr)
 loss_fn = nn.MSELoss()
@@ -242,15 +406,20 @@ loss_fn = nn.MSELoss()
 # =========================
 if train:
     for epoch in range(epochs):
-        for x0 in dataloader:
-            x0 = augment(x0.to(device))
+        for x0, input_ids in dataloader:
+            x0 = x0.to(device)
+            input_ids = input_ids.to(device)
+
+            with torch.no_grad():
+                text_emb = text_encoder(input_ids).last_hidden_state
+
             B = x0.size(0)
             t = torch.randint(0, T, (B,), device=device)
             noise = torch.randn_like(x0)
             alpha_bar = alpha_bars[t].view(B,1,1,1)
             xt = torch.sqrt(alpha_bar) * x0 + torch.sqrt(1 - alpha_bar) * noise
             t_norm = t / T
-            pred = model(xt, t_norm.float())
+            pred = model(xt, t_norm.float(), text_emb)
             loss = loss_fn(pred, noise)
             optimizer.zero_grad()
             loss.backward()
@@ -263,16 +432,23 @@ if train:
     print("Training done. Model saved.")
 
 else:
-    # Load pretrained EMA model
     model.load_state_dict(torch.load("diffusion_ema.pth", map_location=device))
     model.eval()
+
+    prompt = "Blue haired girl"
     num_images = 6
-    samples = sample(model, (num_images, 3, 64, 64))
-    samples = samples.clamp(-1,1)
-    samples = (samples.cpu().numpy().transpose(0,2,3,1) + 1)/2
-    plt.figure(figsize=(12,6))
+    input_ids = tokenizer(prompt, padding="max_length", truncation=True,
+                          max_length=77, return_tensors="pt").input_ids.to(device)
+    input_ids = input_ids.repeat(num_images, 1)
+    with torch.no_grad():
+        text_emb = text_encoder(input_ids).last_hidden_state
+
+    samples = sample(model, (num_images, 3, 64, 64), text_emb)
+    samples = samples.clamp(-1, 1)
+    samples = (samples.cpu().numpy().transpose(0, 2, 3, 1) + 1) / 2
+    plt.figure(figsize=(12, 6))
     for i in range(num_images):
-        plt.subplot(2,3,i+1)
+        plt.subplot(2, 3, i+1)
         plt.imshow(samples[i])
         plt.axis("off")
     plt.tight_layout()

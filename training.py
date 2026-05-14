@@ -10,9 +10,6 @@ import math
 import os
 from torchvision import transforms
 
-from transformers import CLIPTextModel, CLIPTokenizer
-
-
 # =========================
 # SETTINGS
 # =========================
@@ -45,54 +42,6 @@ image_paths = [
     "image copy 20.png"
 ]
 
-captions = [
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Blue haired girl",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy",
-    "Brown haired boy"
-
-
-]
-
 device = "cuda" if torch.cuda.is_available() else "cpu"
 T = 400
 epochs = 200
@@ -109,40 +58,27 @@ augment = transforms.Compose([
 # LOAD IMAGES
 # =========================
 
-class ImageCaptionDataset(Dataset):
-    def __init__(self, paths, captions, tokenizer, size=64):
-        assert len(paths) == len(captions), "Paths and captions must match"
+class ImageDataset(Dataset):
+    def __init__(self, paths, size=64):
         self.size = size
-        self.tokenizer = tokenizer
         self.samples = []
 
-        for path, caption in zip(paths, captions):
+        for path in paths:
             if not os.path.exists(path):
                 print(f"Warning: {path} not found, skipping")
                 continue
-            self.samples.append((path, caption))
+            self.samples.append(path)
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        path, caption = self.samples[idx]
-
+        path = self.samples[idx]
         img = Image.open(path).convert("RGB").resize((self.size, self.size))
         img = augment(img)
         x = np.array(img).astype(np.float32) / 127.5 - 1
         x = torch.tensor(np.transpose(x, (2, 0, 1)))
-
-        token = self.tokenizer(
-            caption,
-            padding="max_length",
-            truncation=True,
-            max_length=77,
-            return_tensors="pt"
-        )
-        input_ids = token.input_ids.squeeze(0)
-
-        return x, input_ids
+        return x
 
 
 # =========================
@@ -226,41 +162,8 @@ class MultiHeadAttention(nn.Module):
         out = torch.einsum('bhnm,bhcm->bhcn', attn, v)
         out = out.reshape(B, C, H, W)
         return x + self.proj(out)
-class CrossAttention(nn.Module):
-    def __init__(self, channels, text_dim, heads=4):
-        super().__init__()
-        self.heads = heads
-        self.scale = (channels // heads) ** -0.5
-
-        self.to_q = nn.Conv2d(channels, channels, 1)
-        self.to_k = nn.Linear(text_dim, channels)
-        self.to_v = nn.Linear(text_dim, channels)
-
-        self.proj = nn.Conv2d(channels, channels, 1)
-
-    def forward(self, x, text_emb):
-        B, C, H, W = x.shape
-
-        # IMAGE → queries (tokens = H*W)
-        q = self.to_q(x).reshape(B, self.heads, C//self.heads, H*W)
-
-        # TEXT → keys/values (tokens = 77)
-        k = self.to_k(text_emb)   # (B, 77, C)
-        v = self.to_v(text_emb)
-
-        k = k.reshape(B, -1, self.heads, C//self.heads).transpose(1,2)  # (B,h,77,d)
-        v = v.reshape(B, -1, self.heads, C//self.heads).transpose(1,2)
-
-   
-        attn = torch.einsum('bhdn,bhmd->bhnm', q, k) * self.scale
-        attn = torch.softmax(attn, dim=-1)
-
-        out = torch.einsum('bhnm,bhmd->bhdn', attn, v)
-
-        out = out.reshape(B, C, H, W)
-        return x + self.proj(out)
 class UNet(nn.Module):
-    def __init__(self, base=128, time_dim=256, text_dim=768):
+    def __init__(self, base=128, time_dim=256):
         super().__init__()
 
         self.time_mlp = nn.Sequential(
@@ -278,19 +181,16 @@ class UNet(nn.Module):
 
         self.down2_block1 = ResBlock(base * 2, base * 2, time_dim)
         self.down2_attn = MultiHeadAttention(base * 2)
-        self.down2_crossattn = CrossAttention(base * 2, text_dim)
         self.down2_block2 = ResBlock(base * 2, base * 2, time_dim)
         self.downsample2 = nn.Conv2d(base * 2, base * 4, 4, 2, 1)
 
         self.down3_block1 = ResBlock(base * 4, base * 4, time_dim)
         self.down3_attn = MultiHeadAttention(base * 4)
-        self.down3_crossattn = CrossAttention(base * 4, text_dim)
         self.down3_block2 = ResBlock(base * 4, base * 4, time_dim)
         self.downsample3 = nn.Conv2d(base * 4, base * 8, 4, 2, 1)
 
         self.mid_block1 = ResBlock(base * 8, base * 8, time_dim)
         self.mid_attn = MultiHeadAttention(base * 8)
-        self.mid_crossattn = CrossAttention(base * 8, text_dim)
         self.mid_block2 = ResBlock(base * 8, base * 8, time_dim)
 
         self.up1 = nn.ConvTranspose2d(base * 8, base * 4, 4, 2, 1)
@@ -307,7 +207,7 @@ class UNet(nn.Module):
 
         self.final = nn.Conv2d(base, 3, 1)
 
-    def forward(self, x, t, text_emb):
+    def forward(self, x, t):
         t = self.time_mlp(t)
         x = self.init(x)
 
@@ -317,19 +217,16 @@ class UNet(nn.Module):
 
         d2 = self.down2_block1(x, t)
         d2 = self.down2_attn(d2)
-        d2 = self.down2_crossattn(d2, text_emb)
         d2 = self.down2_block2(d2, t)
         x = self.downsample2(d2)
 
         d3 = self.down3_block1(x, t)
         d3 = self.down3_attn(d3)
-        d3 = self.down3_crossattn(d3, text_emb)
         d3 = self.down3_block2(d3, t)
         x = self.downsample3(d3)
 
         x = self.mid_block1(x, t)
         x = self.mid_attn(x)
-        x = self.mid_crossattn(x, text_emb)
         x = self.mid_block2(x, t)
 
         x = self.up1(x)
@@ -359,12 +256,12 @@ def update_ema(ema_model, model):
 
 
 @torch.no_grad()
-def sample(model, shape, text_emb):
+def sample(model, shape):
     x = torch.randn(shape, device=device)
     for t in reversed(range(T)):
         t_batch = torch.full((shape[0],), t, device=device).float()
         t_norm = t_batch / T
-        pred_noise = model(x, t_norm, text_emb)
+        pred_noise = model(x, t_norm)
 
         alpha = alphas[t]
         alpha_bar = alpha_bars[t]
@@ -386,17 +283,11 @@ def sample(model, shape, text_emb):
 # =========================
 # MODEL SETUP
 # =========================
-tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
-text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14").to(device)
-text_encoder.eval()
-for param in text_encoder.parameters():
-    param.requires_grad = False
-
-dataset = ImageCaptionDataset(image_paths, captions, tokenizer, size=64)
+dataset = ImageDataset(image_paths, size=64)
 dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 model = UNet().to(device)
-ema_model = UNet(text_dim=768).to(device)
+ema_model = UNet().to(device)
 ema_model.load_state_dict(model.state_dict())
 optimizer = optim.AdamW(model.parameters(), lr=lr)
 loss_fn = nn.MSELoss()
@@ -406,12 +297,8 @@ loss_fn = nn.MSELoss()
 # =========================
 if train:
     for epoch in range(epochs):
-        for x0, input_ids in dataloader:
+        for x0 in dataloader:
             x0 = x0.to(device)
-            input_ids = input_ids.to(device)
-
-            with torch.no_grad():
-                text_emb = text_encoder(input_ids).last_hidden_state
 
             B = x0.size(0)
             t = torch.randint(0, T, (B,), device=device)
@@ -419,7 +306,7 @@ if train:
             alpha_bar = alpha_bars[t].view(B,1,1,1)
             xt = torch.sqrt(alpha_bar) * x0 + torch.sqrt(1 - alpha_bar) * noise
             t_norm = t / T
-            pred = model(xt, t_norm.float(), text_emb)
+            pred = model(xt, t_norm.float())
             loss = loss_fn(pred, noise)
             optimizer.zero_grad()
             loss.backward()
@@ -435,15 +322,8 @@ else:
     model.load_state_dict(torch.load("diffusion_ema.pth", map_location=device))
     model.eval()
 
-    prompt = "Blue haired girl"
     num_images = 6
-    input_ids = tokenizer(prompt, padding="max_length", truncation=True,
-                          max_length=77, return_tensors="pt").input_ids.to(device)
-    input_ids = input_ids.repeat(num_images, 1)
-    with torch.no_grad():
-        text_emb = text_encoder(input_ids).last_hidden_state
-
-    samples = sample(model, (num_images, 3, 64, 64), text_emb)
+    samples = sample(model, (num_images, 3, 64, 64))
     samples = samples.clamp(-1, 1)
     samples = (samples.cpu().numpy().transpose(0, 2, 3, 1) + 1) / 2
     plt.figure(figsize=(12, 6))
